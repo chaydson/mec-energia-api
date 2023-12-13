@@ -1,0 +1,108 @@
+stages:
+  - lint
+  - test
+  - build
+
+workflow:
+  name: "Pipeline from $CI_PIPELINE_SOURCE (branch: $CI_COMMIT_REF_NAME)"
+  rules:
+    # Pipeline is triggered on merge request.
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+
+    # Pipeline is triggered for every commit on every branch.
+    - if: $CI_PIPELINE_SOURCE == 'push'
+
+# Reference: https://docs.gitlab.com/ee/ci/variables/predefined_variables.html
+variables:
+  # Temporary until tags are implemented.
+  VERSION: "1.0.$CI_PIPELINE_IID"
+
+.base-python:
+  image: python:3.10.5
+  before_script: 
+    - cd $CI_PROJECT_DIR
+    - pip install -U -r requirements.txt
+  variables:
+    DJANGO_SETTINGS_MODULE: mec_energia.settings
+  retry: 2
+
+# Written like this to facilitate reuse later.
+.kaniko-build:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.14.0-debug
+    entrypoint: [""]
+  before_script:
+    - echo "Starting to build $CI_REGISTRY_IMAGE:$VERSION"
+    - echo "Verifying if the variables are defined"
+    - if [ -z $CONTEXT ]; then echo "Empty CONTEXT. Exiting!"; exit 1; fi
+    - if [ -z $DOCKERFILE_PATH ]; then echo "Empty DOCKERFILE_PATH. Exiting!"; exit 1; fi
+  script:
+    - >-
+      /kaniko/executor
+      --context $CONTEXT
+      --dockerfile $DOCKERFILE_PATH
+      --single-snapshot
+      --snapshot-mode=redo
+      --cache=true
+      --destination $CI_REGISTRY_IMAGE:$VERSION
+      $EXTRA_ARGS
+  artifacts:
+    expire_in: 5 mins
+
+.kaniko-build-no-push:
+  extends: .kaniko-build
+  script:
+    - >-
+      /kaniko/executor
+      --context $CONTEXT
+      --dockerfile $DOCKERFILE_PATH
+      --single-snapshot
+      --snapshot-mode=redo
+      --no-push
+
+lint:
+  stage: lint
+  extends: .base-python
+  script:
+    - python -m pylint --load-plugins pylint_django .
+
+unit-test:
+  stage: test
+  extends: .base-python
+  coverage: '/(?i)total.*? (100(?:\.0+)?\%|[1-9]?\d(?:\.\d+)?\%)$/'
+  script:
+    - python -m pytest
+  after_script:
+    # Replace the third / in gitlab pages url with /-/.
+    - export REPORT_URL=$(echo $REPORT_URL | sed 's|/|/-/|3')
+    - echo "Test report available at $REPORT_URL/index.html"
+    - echo "Coverage report available at $REPORT_URL/cov/index.html"
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - $CI_PROJECT_DIR/$REPORT_PATH
+  variables:
+    REPORT_PATH: reports
+    REPORT_URL: $CI_PAGES_URL/-/jobs/$CI_JOB_ID/artifacts/$REPORT_PATH
+  cache:
+    - key: "pytest-cache"
+      paths:
+        - .pytest_cache
+
+test-build:
+  stage: test
+  extends: .kaniko-build-no-push
+  variables:
+    CONTEXT: $CI_PROJECT_DIR
+    DOCKERFILE_PATH: Dockerfile
+
+build:
+  extends: .kaniko-build
+  variables:
+    CONTEXT: $CI_PROJECT_DIR
+    EXTRA_ARGS: "--destination $CI_REGISTRY_IMAGE:latest"
+    DOCKERFILE_PATH: Dockerfile
+  rules:
+    - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == 'push'

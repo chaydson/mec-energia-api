@@ -1,0 +1,8 @@
+docker-compose.yml
+Dockerfile
+.git/
+.gitignore
+venv/
+postgres-data/
+README.md
+docs/
